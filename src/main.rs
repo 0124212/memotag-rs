@@ -1,592 +1,162 @@
+mod modules;
+
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::{DateTime, NaiveDateTime, Utc};
-use regex::Regex;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::time::Duration;
+use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use serde::Deserialize;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
-#[derive(Debug, Deserialize)]
-struct Attachment {
+use modules::config::Config;
+use modules::db::Database;
+use modules::sync::SyncService;
+
+struct AppState {
+    sync_tx: mpsc::Sender<()>,
+}
+
+#[derive(Deserialize)]
+struct WebhookPayload {
     #[serde(default)]
-    filename: String,
-    #[serde(rename = "type", default)]
-    mime_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Memo {
-    name: String,
-    content: String,
+    event: String,
     #[serde(default)]
-    attachments: Vec<Attachment>,
-    #[serde(rename = "createTime", default)]
-    #[allow(dead_code)]
-    create_time: String,
-    #[serde(rename = "updateTime", default)]
-    #[allow(dead_code)]
-    update_time: String,
+    memo_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ListMemosResponse {
-    memos: Vec<Memo>,
-    #[serde(rename = "nextPageToken")]
-    next_page_token: Option<String>,
+async fn health() -> &'static str {
+    "ok"
 }
 
-#[derive(Debug, Serialize)]
-struct MemoPatch {
-    content: String,
-}
+async fn webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WebhookPayload>,
+) -> StatusCode {
+    info!("webhook received: event={}, memo={:?}", payload.event, payload.memo_name);
 
-struct Autotagger {
-    client: Client,
-    base_url: String,
-    api_token: String,
-    default_tag: String,
-    interval: Duration,
-    re_ansi: Regex,
-    re_link: Regex,
-    re_image: Regex,
-    re_audio: Regex,
-    re_video: Regex,
-    re_code: Regex,
-    re_task: Regex,
-    re_quote: Regex,
-    re_file_ext: Regex,
-    re_hashtag: Regex,
-    re_date: Regex,
-    known_exts: HashSet<&'static str>,
-    vikunja_url: String,
-    vikunja_user: String,
-    vikunja_pass: String,
-    vikunja_project: i32,
-    vikunja_token_cache: tokio::sync::OnceCell<String>,
-    radicale_url: String,
-    radicale_user: String,
-    radicale_pass: String,
-}
-
-impl Autotagger {
-    fn new(base_url: String, api_token: String, default_tag: String, interval_secs: u64) -> Self {
-        let re_ansi = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-        let re_link = Regex::new(r"https?://[^\s\)\]]+").unwrap();
-        let re_image = Regex::new(r"(?i)(<img\s|!\[[^\]]*\]\([^)]*\)|\.(png|jpe?g|gif|bmp|svg|webp|tiff?|ico|heic|heif|avif)[\s\)\]\?])").unwrap();
-        let re_audio = Regex::new(r"(?i)\.(mp3|wav|ogg|m4a|flac|aac|wma|opus)[\s\)\]\?]").unwrap();
-        let re_video = Regex::new(r"(?i)\.(mp4|mkv|webm|avi|mov|flv|m4v|3gp|ogv)[\s\)\]\?]").unwrap();
-        let re_code = Regex::new(r"```(rust|python|js|ts|go|bash|sh|sql|yaml|json|toml)").unwrap();
-        let re_task = Regex::new(r"^- \[[ x]\]").unwrap();
-        let re_quote = Regex::new(r"^>").unwrap();
-        let re_file_ext = Regex::new(r"(?i)\.([a-z]{2,10})(?:\s|$|\)|\]|\?)").unwrap();
-        let re_hashtag = Regex::new(r"(\s*)#([^\s#]+)").unwrap();
-        let re_date = Regex::new(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})").unwrap();
-        let vikunja_url = std::env::var("VIKUNJA_URL").unwrap_or_else(|_| "http://vikunja:3456".to_string());
-        let vikunja_user = std::env::var("VIKUNJA_USER").unwrap_or_else(|_| "asher".to_string());
-        let vikunja_pass = std::env::var("VIKUNJA_PASS").unwrap_or_else(|_| "asher123".to_string());
-        let vikunja_project = std::env::var("VIKUNJA_PROJECT").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
-        let radicale_url = std::env::var("RADICALE_URL").unwrap_or_else(|_| "http://radicale:5232".to_string());
-        let radicale_user = std::env::var("RADICALE_USER").unwrap_or_else(|_| "asher".to_string());
-        let radicale_pass = std::env::var("RADICALE_PASS").unwrap_or_else(|_| "asher123".to_string());
-
-        // Whitelist of file extensions worth tagging
-        let known_exts: HashSet<&str> = [
-            "txt", "md", "pdf", "docx", "pptx", "xlsx", "csv", "json", "yaml", "yml",
-            "toml", "xml", "html", "css", "js", "ts", "jsx", "tsx", "rs", "go",
-            "py", "rb", "java", "c", "cpp", "h", "sh", "bash", "zsh", "sql",
-            "r", "lua", "zig", "nim", "ex", "exs", "erl", "hs", "ml", "swift",
-            "kt", "scala", "cs", "fs", "vb", "php", "pl", "pm", "raku",
-            "dockerfile", "makefile", "cmake", "gradle", "sbt", "cabal",
-            "gitignore", "env", "lock", "log", "ini", "cfg", "conf",
-            "tar", "gz", "zip", "bz2", "xz", "tgz", "7z", "rar",
-            "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "tiff", "ico", "heic", "avif",
-            "mp3", "wav", "ogg", "m4a", "flac", "aac", "opus",
-            "mp4", "mkv", "webm", "avi", "mov", "flv",
-            "exe", "dmg", "rpm", "deb", "apk", "msi",
-            "pem", "key", "crt", "cert",
-            "patch", "diff",
-        ].into_iter().collect();
-
-        Self {
-            client: Client::new(),
-            base_url,
-            api_token,
-            default_tag,
-            interval: Duration::from_secs(interval_secs),
-            re_ansi,
-            re_link,
-            re_image,
-            re_audio,
-            re_video,
-            re_code,
-            re_task,
-            re_quote,
-            re_file_ext,
-            re_hashtag,
-            re_date,
-            known_exts,
-            vikunja_url,
-            vikunja_user,
-            vikunja_pass,
-            vikunja_project,
-            vikunja_token_cache: tokio::sync::OnceCell::new(),
-            radicale_url,
-            radicale_user,
-            radicale_pass,
-        }
+    if payload.event == "UPDATE" || payload.event == "CREATE" {
+        let _ = state.sync_tx.try_send(());
     }
 
-    fn detect_tags(&self, memo: &Memo) -> Vec<String> {
-        let mut tags = Vec::new();
-
-        // Check attachments for image/audio/video
-        for att in &memo.attachments {
-            let mime = att.mime_type.to_lowercase();
-            let fname = att.filename.to_lowercase();
-            if mime.starts_with("image/") || fname.ends_with(".jpg") || fname.ends_with(".jpeg") || fname.ends_with(".png") || fname.ends_with(".gif") || fname.ends_with(".webp") || fname.ends_with(".heic") {
-                if !tags.contains(&"image".to_string()) {
-                    tags.push("image".to_string());
-                }
-            }
-            if mime.starts_with("audio/") || fname.ends_with(".mp3") || fname.ends_with(".wav") || fname.ends_with(".m4a") || fname.ends_with(".flac") {
-                if !tags.contains(&"audio".to_string()) {
-                    tags.push("audio".to_string());
-                }
-            }
-            if mime.starts_with("video/") || fname.ends_with(".mp4") || fname.ends_with(".mov") || fname.ends_with(".avi") {
-                if !tags.contains(&"video".to_string()) {
-                    tags.push("video".to_string());
-                }
-            }
-        }
-
-        // Strip ANSI escape sequences before matching
-        let clean = self.re_ansi.replace_all(&memo.content, "");
-
-        if self.re_link.is_match(&clean) {
-            tags.push("link".to_string());
-        }
-        if self.re_image.is_match(&clean) {
-            tags.push("image".to_string());
-        }
-        if self.re_audio.is_match(&clean) {
-            tags.push("audio".to_string());
-        }
-        if self.re_video.is_match(&clean) {
-            tags.push("video".to_string());
-        }
-        if self.re_code.is_match(&clean) {
-            tags.push("code".to_string());
-        }
-        if self.re_task.is_match(&clean) {
-            tags.push("task".to_string());
-        }
-        if self.re_quote.is_match(&clean) {
-            tags.push("quote".to_string());
-        }
-
-        // Extract specific file extensions as tags (whitelist only)
-        for cap in self.re_file_ext.captures_iter(&clean) {
-            if let Some(ext) = cap.get(1) {
-                let tag = ext.as_str().to_lowercase();
-                if !tags.contains(&tag)
-                    && self.known_exts.contains(tag.as_str())
-                {
-                    tags.push(tag);
-                }
-            }
-        }
-
-        if tags.is_empty() {
-            tags.push(self.default_tag.clone());
-        }
-
-        tags
-    }
-
-    fn existing_hashtags(&self, content: &str) -> HashSet<String> {
-        self.re_hashtag.captures_iter(content)
-            .map(|c| c[2].to_lowercase())
-            .collect()
-    }
-
-    async fn run(&self) -> Result<()> {
-        info!(
-            "autotagger starting: default_tag={}, interval={}s",
-            self.default_tag,
-            self.interval.as_secs()
-        );
-
-        loop {
-            if let Err(e) = self.process_once().await {
-                warn!("error in autotagger loop: {}", e);
-            }
-            tokio::time::sleep(self.interval).await;
-        }
-    }
-
-    async fn process_once(&self) -> Result<()> {
-        let mut page_token: Option<String> = None;
-        let mut total_tagged = 0;
-        let mut total_scanned = 0;
-
-        loop {
-            let mut url = format!(
-                "{}/api/v1/memos?pageSize=50",
-                self.base_url
-            );
-            if let Some(token) = &page_token {
-                let encoded = token.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
-                url.push_str(&format!("&pageToken={}", encoded));
-            }
-
-            let resp = self.client
-                .get(&url)
-                .bearer_auth(&self.api_token)
-                .send()
-                .await?;
-            let resp_text = resp.text().await?;
-
-            let resp: ListMemosResponse = match serde_json::from_str(&resp_text) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("failed to parse response ({}): {}", e, &resp_text[..resp_text.len().min(200)]);
-                    return Ok(());
-                }
-            };
-
-            for memo in resp.memos {
-                if memo.content.trim().is_empty() {
-                    continue;
-                }
-
-                total_scanned += 1;
-
-                // Fold #untagged → #inbox and #tasks → #task BEFORE skip check
-                // (these are always wrong/leftover regardless of other tags)
-                let mut new_content = memo.content.clone();
-                let mut changed = false;
-                if new_content.to_lowercase().contains("#untagged") {
-                    let before = new_content.clone();
-                    new_content = new_content.replace("#untagged", "#inbox").replace("#Untagged", "#inbox").replace("#UNTAGGED", "#inbox");
-                    if new_content != before {
-                        changed = true;
-                    }
-                }
-                if new_content.to_lowercase().contains("#tasks") {
-                    let before = new_content.clone();
-                    new_content = new_content.replace("#tasks", "#task").replace("#Tasks", "#task").replace("#TASKS", "#task");
-                    if new_content != before {
-                        changed = true;
-                    }
-                }
-                // If we changed content, persist it before continuing
-                if changed {
-                    if let Err(e) = self.update_content(&memo, &new_content).await {
-                        warn!("failed to fold tags for {}: {}", memo.name, e);
-                    }
-                }
-
-                let existing = self.existing_hashtags(&new_content);
-                let has_other_existing = existing.iter().any(|t| t != "inbox");
-                let has_inbox_existing = existing.contains("inbox");
-                // Bridge to Vikunja/Radicale before skip (so already-tagged memos still sync)
-                if existing.contains("task") && !existing.contains("task-synced") {
-                    if let Err(e) = self.create_vikunja_task(&memo).await {
-                        warn!("vikunja failed for {}: {}", memo.name, e);
-                    }
-                }
-                if existing.contains("calendar") && !existing.contains("calendar-synced") {
-                    if let Err(e) = self.create_radicale_event(&memo).await {
-                        warn!("radicale failed for {}: {}", memo.name, e);
-                    }
-                }
-                // Skip memos that already have a proper tag (other tag, no inbox to clean) — but not if it's the #tasks typo
-                if has_other_existing && !has_inbox_existing && !existing.contains("tasks") {
-                    continue;
-                }
-                let detected = self.detect_tags(&memo);
-
-                let new_tags: Vec<String> = detected
-                    .iter()
-                    .filter(|t| !existing.contains(t.as_str()))
-                    .cloned()
-                    .collect();
-
-                let has_non_inbox_detected = detected.iter().any(|t| t != "inbox");
-                let has_non_inbox_new = new_tags.iter().any(|t| t != "inbox");
-                let needs_inbox_cleanup = has_inbox_existing && (has_other_existing || has_non_inbox_detected);
-
-                // Filter out inbox if we need cleanup or have real tags
-                let final_new_tags: Vec<String> = if needs_inbox_cleanup || has_non_inbox_new {
-                    new_tags.into_iter().filter(|t| t != "inbox").collect()
-                } else {
-                    new_tags
-                };
-
-                if needs_inbox_cleanup {
-                    let before = new_content.clone();
-                    new_content = new_content.replace(" #inbox", "").replace("#inbox ", "").replace("#inbox", "");
-                    if new_content != before {
-                        changed = true;
-                    }
-                }
-
-                if final_new_tags.is_empty() && !changed {
-                    continue;
-                }
-
-                if !final_new_tags.is_empty() {
-                    let hashtag_line = final_new_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
-                    if new_content.ends_with('\n') {
-                        new_content.push_str(&hashtag_line);
-                    } else {
-                        new_content.push('\n');
-                        new_content.push_str(&hashtag_line);
-                    }
-                }
-
-                // Clean up extra blank lines from inbox removal
-                while new_content.contains("\n\n\n") {
-                    new_content = new_content.replace("\n\n\n", "\n\n");
-                }
-
-                if self.update_content(&memo, &new_content).await? {
-                    total_tagged += 1;
-                    if !final_new_tags.is_empty() {
-                        info!(
-                            "tagged memo {} with [{}]",
-                            memo.name,
-                            final_new_tags.join(", ")
-                        );
-                    } else {
-                        info!("cleaned inbox from memo {}", memo.name);
-                    }
-                }
-            }
-
-            page_token = resp.next_page_token.filter(|t| !t.is_empty());
-            if page_token.is_none() {
-                break;
-            }
-        }
-
-        if total_tagged > 0 {
-            info!("tagged {} memos (scanned {} recent)", total_tagged, total_scanned);
-        }
-        Ok(())
-    }
-
-    async fn update_content(&self, memo: &Memo, content: &str) -> Result<bool> {
-        let url = format!("{}/api/v1/{}?updateMask=content", self.base_url, memo.name);
-
-        let payload = MemoPatch {
-            content: content.to_string(),
-        };
-
-        let resp = self.client
-            .patch(&url)
-            .bearer_auth(&self.api_token)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            warn!("update failed for {}: {} - {}", memo.name, status, &body[..body.len().min(200)]);
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
-    async fn vikunja_token(&self) -> Result<String> {
-        if let Some(t) = self.vikunja_token_cache.get() {
-            return Ok(t.clone());
-        }
-        let resp = self.client
-            .post(format!("{}/api/v1/login", self.vikunja_url))
-            .json(&serde_json::json!({"username": self.vikunja_user, "password": self.vikunja_pass}))
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        let data: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        if let Some(t) = data["token"].as_str() {
-            let _ = self.vikunja_token_cache.set(t.to_string());
-            return Ok(t.to_string());
-        }
-        anyhow::bail!("vikunja login failed {}: {}", status, &text[..text.len().min(300)])
-    }
-
-    async fn create_vikunja_task(&self, memo: &Memo) -> Result<()> {
-        let token = self.vikunja_token().await?;
-        let title = memo.content.lines().next().unwrap_or("Untitled").chars().take(100).collect::<String>().trim().to_string();
-        let title = if title.is_empty() { "Untitled".to_string() } else { title };
-        let payload = serde_json::json!({"title": title, "description": memo.content});
-        let resp = self.client
-            .put(format!("{}/api/v1/projects/{}/tasks", self.vikunja_url, self.vikunja_project))
-            .bearer_auth(&token)
-            .json(&payload)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("vikunja create failed: {}", resp.status());
-        }
-        // mark memo as synced
-        let new_content = format!("{}\n#task-synced", memo.content.trim_end());
-        self.update_content(memo, &new_content).await?;
-        info!("created vikunja task for {}", memo.name);
-        Ok(())
-    }
-
-    async fn create_radicale_event(&self, memo: &Memo) -> Result<()> {
-        let caps = self.re_date.captures(&memo.content).ok_or_else(|| anyhow::anyhow!("no date found"))?;
-        let date_str = format!("{} {}", &caps[1], &caps[2]);
-        let dt = NaiveDateTime::parse_from_str(&date_str, "%Y-%m-%d %H:%M")?;
-        let uid = memo.name.replace('/', "-");
-        let dt_utc: DateTime<Utc> = DateTime::from_naive_utc_and_offset(dt, Utc);
-        let ics = format!(
-            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//memotag//EN\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
-            uid,
-            Utc::now().format("%Y%m%dT%H%M%SZ"),
-            dt_utc.format("%Y%m%dT%H%M%SZ"),
-            memo.content.lines().next().unwrap_or("Event").replace('\n', "\\n").chars().take(100).collect::<String>(),
-            memo.content.replace('\n', "\\n").replace('\r', "")
-        );
-        let cred = BASE64.encode(format!("{}:{}", self.radicale_user, self.radicale_pass));
-        let resp = self.client
-            .put(format!("{}/asher/events/{}.ics", self.radicale_url.trim_end_matches('/'), uid))
-            .header("Authorization", format!("Basic {}", cred))
-            .header("Content-Type", "text/calendar; charset=utf-8")
-            .body(ics)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("radicale put failed: {}", resp.status());
-        }
-        let new_content = format!("{}\n#calendar-synced", memo.content.trim_end());
-        self.update_content(memo, &new_content).await?;
-        info!("created radicale event for {}", memo.name);
-        Ok(())
-    }
-
-    fn is_junk_hashtag(tag: &str) -> bool {
-        let t = tag.to_lowercase();
-        // Single letter + digit: f0, b0, f1, b1, etc.
-        if t.len() == 2 && t.chars().next().unwrap().is_ascii_alphabetic() && t.chars().nth(1).unwrap().is_ascii_digit() {
-            return true;
-        }
-        // Two letters + digit: bold, etc. — keep those, they're real words
-        // Version strings: 28475v1, 03386v1, etc.
-        if Regex::new(r"^\d+v\d+$").unwrap().is_match(&t) {
-            return true;
-        }
-        // Short alphanumeric junk: 55t, 0rc1, etc. (starts with digit)
-        if t.len() <= 4 && t.chars().next().unwrap().is_ascii_digit() {
-            return true;
-        }
-        false
-    }
-
-    async fn clean_junk_hashtags(&self) -> Result<()> {
-        info!("clean mode: removing junk hashtags from all memos");
-        let mut page_token: Option<String> = None;
-        let mut total_cleaned = 0;
-
-        loop {
-            let mut url = format!(
-                "{}/api/v1/memos?pageSize=50",
-                self.base_url
-            );
-            if let Some(token) = &page_token {
-                let encoded = token.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
-                url.push_str(&format!("&pageToken={}", encoded));
-            }
-
-            let resp = self.client
-                .get(&url)
-                .bearer_auth(&self.api_token)
-                .send()
-                .await?;
-            let resp_text = resp.text().await?;
-
-            let resp: ListMemosResponse = match serde_json::from_str(&resp_text) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("failed to parse response ({}): {}", e, &resp_text[..resp_text.len().min(200)]);
-                    return Ok(());
-                }
-            };
-
-            for memo in resp.memos {
-                if memo.content.trim().is_empty() {
-                    continue;
-                }
-
-                // Find all hashtags in content and remove junk ones
-                let mut new_content = memo.content.clone();
-                let mut changed = false;
-
-                // Collect junk hashtags to remove (iterate in reverse to maintain positions)
-                let mut removals: Vec<(usize, usize)> = Vec::new();
-                for cap in self.re_hashtag.captures_iter(&memo.content) {
-                    let tag = &cap[2];
-                    if Self::is_junk_hashtag(tag) {
-                        removals.push((cap.get(0).unwrap().start(), cap.get(0).unwrap().end()));
-                    }
-                }
-
-                // Remove in reverse order to preserve positions
-                for (start, end) in removals.into_iter().rev() {
-                    new_content.drain(start..end);
-                    changed = true;
-                }
-
-                // Clean up multiple blank lines that might result from removal
-                if changed {
-                    let multi_nl = Regex::new(r"\n{3,}").unwrap();
-                    new_content = multi_nl.replace_all(&new_content, "\n\n").to_string();
-
-                    if self.update_content(&memo, &new_content).await? {
-                        total_cleaned += 1;
-                        info!("cleaned memo {}", memo.name);
-                    }
-                }
-            }
-
-            page_token = resp.next_page_token.filter(|t| !t.is_empty());
-            if page_token.is_none() {
-                break;
-            }
-        }
-
-        info!("cleaned {} memos", total_cleaned);
-        Ok(())
-    }
+    StatusCode::OK
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("memotag_rs=info,tower_http=info"))
+        )
+        .init();
 
-    let base_url = std::env::var("MEMOS_URL").unwrap_or_else(|_| "https://memos.junilab.xyz".to_string());
-    let api_token = std::env::var("MEMOS_API_TOKEN").expect("MEMOS_API_TOKEN required");
-    let default_tag = std::env::var("AUTOTAG_DEFAULT_TAG").unwrap_or_else(|_| "inbox".to_string());
-    let interval = std::env::var("AUTOTAG_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+    let config = Config::load(None)?;
+    info!("memotag-rs starting: memos_url={}", config.memos_url);
 
     let clean_mode = std::env::args().any(|a| a == "--clean");
-
-    let autotagger = Autotagger::new(base_url, api_token, default_tag, interval);
+    let sync_only = std::env::args().any(|a| a == "--sync");
 
     if clean_mode {
-        autotagger.clean_junk_hashtags().await
-    } else {
-        autotagger.run().await
+        let memos = modules::memos::MemosClient::new(config.memos_url.clone(), config.memos_token.clone());
+        let autotagger = modules::autotag::Autotagger::new(
+            memos, config.autotag_default_tag.clone(), config.autotag_interval,
+            std::env::var("VIKUNJA_URL").unwrap_or_else(|_| "http://vikunja:3456".to_string()),
+            std::env::var("VIKUNJA_USER").unwrap_or_else(|_| "asher".to_string()),
+            std::env::var("VIKUNJA_PASS").unwrap_or_else(|_| "asher123".to_string()),
+            std::env::var("VIKUNJA_PROJECT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
+            std::env::var("RADICALE_URL").unwrap_or_else(|_| "http://radicale:5232".to_string()),
+            std::env::var("RADICALE_USER").unwrap_or_else(|_| "asher".to_string()),
+            std::env::var("RADICALE_PASS").unwrap_or_else(|_| "asher123".to_string()),
+        );
+        return autotagger.clean_junk_hashtags().await;
     }
+
+    let db = Database::open(&config.db_path)?;
+    let sync = SyncService::new(&config, db)?;
+
+    if let Err(e) = sync.ensure_cal().await {
+        warn!("CalDAV collection setup failed: {}", e);
+    }
+
+    if sync_only {
+        info!("running sync-only mode");
+        sync.full_sync().await?;
+        return Ok(());
+    }
+
+    // Full sync on startup
+    if config.caldav.is_configured() {
+        if let Err(e) = sync.full_sync().await {
+            warn!("full sync failed: {}", e);
+        }
+    }
+
+    // Channel for webhook → sync service communication
+    let (sync_tx, mut sync_rx) = mpsc::channel::<()>(16);
+
+    let state = Arc::new(AppState { sync_tx });
+
+    // HTTP server for webhook + health
+    let app = Router::new()
+        .route("/healthz", get(health))
+        .route("/webhook", post(webhook_handler))
+        .with_state(state)
+        .layer(tower_http::cors::CorsLayer::permissive());
+
+    let addr = format!("0.0.0.0:{}", config.listen_port);
+    info!("webhook server listening on {}", addr);
+
+    let listener = TcpListener::bind(&addr).await?;
+
+    // Spawn autotagger
+    let autotag_config = config.clone();
+    tokio::spawn(async move {
+        let memos = modules::memos::MemosClient::new(
+            autotag_config.memos_url.clone(), autotag_config.memos_token.clone(),
+        );
+        let autotagger = modules::autotag::Autotagger::new(
+            memos, autotag_config.autotag_default_tag.clone(), autotag_config.autotag_interval,
+            std::env::var("VIKUNJA_URL").unwrap_or_else(|_| "http://vikunja:3456".to_string()),
+            std::env::var("VIKUNJA_USER").unwrap_or_else(|_| "asher".to_string()),
+            std::env::var("VIKUNJA_PASS").unwrap_or_else(|_| "asher123".to_string()),
+            std::env::var("VIKUNJA_PROJECT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
+            std::env::var("RADICALE_URL").unwrap_or_else(|_| "http://radicale:5232".to_string()),
+            std::env::var("RADICALE_USER").unwrap_or_else(|_| "asher".to_string()),
+            std::env::var("RADICALE_PASS").unwrap_or_else(|_| "asher123".to_string()),
+        );
+        if let Err(e) = autotagger.run().await {
+            warn!("autotagger exited: {}", e);
+        }
+    });
+
+    // Spawn sync service (listens for webhook triggers + periodic polling)
+    let sync_config = config.clone();
+    tokio::spawn(async move {
+        let db = Database::open(&sync_config.db_path).expect("failed to open db for sync");
+        let sync = SyncService::new(&sync_config, db).expect("failed to create sync service");
+        let poll_interval = std::time::Duration::from_secs(sync_config.caldav.poll_secs);
+
+        loop {
+            tokio::select! {
+                _ = sync_rx.recv() => {
+                    info!("webhook triggered sync");
+                    if let Err(e) = sync.poll_caldav().await {
+                        warn!("webhook sync error: {}", e);
+                    }
+                }
+                _ = tokio::time::sleep(poll_interval) => {
+                    if sync_config.caldav.is_configured() {
+                        if let Err(e) = sync.poll_caldav().await {
+                            warn!("calDAV poll error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
