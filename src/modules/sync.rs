@@ -3,7 +3,7 @@ use sha2::{Sha256, Digest};
 use std::time::Duration;
 use tracing::{info, warn};
 
-use super::caldav::{self, CalDavClient, VTodo, VTodoStatus};
+use super::caldav::{self, CalDavClient, CalDavItem, VTodo, VTodoStatus, VEvent};
 use super::config::Config;
 use super::db::Database;
 use super::memos::MemosClient;
@@ -56,8 +56,7 @@ impl SyncService {
         info!("fetched {} memos from server", all_memos.len());
 
         let all_mappings = self.db.get_all_mappings().await?;
-        let mapping_count = all_mappings.len();
-        info!("{} task mappings in database", mapping_count);
+        info!("{} sync mappings in database", all_mappings.len());
 
         let mut synced = 0;
 
@@ -70,116 +69,125 @@ impl SyncService {
         }
 
         // Clean up CalDAV items that no longer exist in any memo
-        let memo_ids_with_tasks = self.db.get_all_memo_ids_with_tasks().await?;
+        let memo_ids_with_items = self.db.get_all_memo_ids().await?;
         let memo_ids: Vec<String> = all_memos.iter().map(|m| MemosClient::extract_memo_id(&m.name)).collect();
 
-        for task_memo_id in &memo_ids_with_tasks {
-            if !memo_ids.contains(task_memo_id) {
-                info!("memo {} no longer exists, cleaning up tasks", task_memo_id);
-                let mappings = self.db.get_mappings_for_memo(task_memo_id).await?;
+        for item_memo_id in &memo_ids_with_items {
+            if !memo_ids.contains(item_memo_id) {
+                info!("memo {} no longer exists, cleaning up items", item_memo_id);
+                let mappings = self.db.get_mappings_for_memo(item_memo_id).await?;
                 for mapping in &mappings {
-                    if let Err(e) = cal.delete_vtodo(&mapping.caldav_href).await {
-                        warn!("failed to delete orphan VTODO {}: {}", mapping.caldav_uid, e);
+                    if let Err(e) = cal.delete_item(&mapping.caldav_href).await {
+                        warn!("failed to delete orphan item {}: {}", mapping.caldav_uid, e);
                     }
                     self.db.delete_mapping(&mapping.caldav_uid).await?;
                 }
             }
         }
 
-        self.db.update_sync_state(true).await?;
         info!("full sync complete: {} memos synced", synced);
         Ok(())
     }
 
-    /// Sync a single memo's tasks to CalDAV.
+    /// Sync a single memo's tasks and events to CalDAV.
     async fn sync_memo_to_caldav(&self, memo: &super::memos::Memo) -> Result<()> {
         let cal = self.caldav.as_ref().unwrap();
         let memo_id = MemosClient::extract_memo_id(&memo.name);
-        let tasks = parser::parse_tasks(&memo.content);
+        let content_hash = hash_content(&memo.content);
 
-        if tasks.is_empty() {
-            let existing = self.db.get_mappings_for_memo(&memo_id).await?;
-            if !existing.is_empty() {
-                info!("memo {} has no tasks, removing {} existing VTODOs", memo_id, existing.len());
-                for mapping in &existing {
-                    let _ = cal.delete_vtodo(&mapping.caldav_href).await;
-                    self.db.delete_mapping(&mapping.caldav_uid).await?;
-                }
+        // Sync tasks (VTODO)
+        let tasks = parser::parse_tasks(&memo.content);
+        self.sync_items(
+            cal, &memo_id, &memo.name, &content_hash,
+            &tasks, "task",
+        ).await?;
+
+        // Sync events (VEVENT)
+        let events = parser::parse_events(&memo.content);
+        self.sync_events(
+            cal, &memo_id, &memo.name, &content_hash,
+            &events,
+        ).await?;
+
+        Ok(())
+    }
+
+    /// Sync task items (VTODO) for a memo.
+    async fn sync_items(
+        &self,
+        cal: &CalDavClient,
+        memo_id: &str,
+        memo_name: &str,
+        content_hash: &str,
+        tasks: &[parser::ParsedTask],
+        sync_type: &str,
+    ) -> Result<()> {
+        let existing_mappings = self.db.get_mappings_for_memo_by_type(memo_id, sync_type).await?;
+
+        if tasks.is_empty() && !existing_mappings.is_empty() {
+            info!("memo {} has no {}, removing {} existing items", memo_id, sync_type, existing_mappings.len());
+            for mapping in &existing_mappings {
+                let _ = cal.delete_item(&mapping.caldav_href).await;
+                self.db.delete_mapping(&mapping.caldav_uid).await?;
             }
             return Ok(());
         }
 
-        let existing_mappings = self.db.get_mappings_for_memo(&memo_id).await?;
-        let content_hash = hash_content(&memo.content);
-
-        let mut index_map: std::collections::HashMap<i64, &super::db::TaskMapping> = std::collections::HashMap::new();
+        let mut index_map: std::collections::HashMap<i64, &super::db::SyncMapping> = std::collections::HashMap::new();
         for m in &existing_mappings {
-            index_map.insert(m.task_index, m);
+            index_map.insert(m.item_index, m);
         }
 
         let mut existing_indices: std::collections::HashSet<i64> = index_map.keys().cloned().collect();
-        let _new_indices: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-        for task in &tasks {
-            let task_idx = task.index as i64;
+        for task in tasks {
+            let idx = task.index as i64;
 
-            if let Some(mapping) = index_map.get(&task_idx) {
-                let task_changed = mapping.memo_text_hash != content_hash || mapping.done != task.done;
+            if let Some(mapping) = index_map.get(&idx) {
+                let changed = mapping.memo_text_hash != content_hash || mapping.done != task.done;
 
-                if task_changed {
-                    let new_status = if task.done {
-                        VTodoStatus::Completed
-                    } else {
-                        VTodoStatus::NeedAction
-                    };
-
-                    let vtodo = VTodo {
+                if changed {
+                    let new_status = if task.done { VTodoStatus::Completed } else { VTodoStatus::NeedAction };
+                    let item = CalDavItem::Todo(VTodo {
                         uid: mapping.caldav_uid.clone(),
                         summary: task.text.clone(),
                         status: new_status,
                         due: task.due_date.clone(),
                         priority: task.priority,
-                        description: Some(format!("From memo: {}", memo.name)),
-                        ical_data: String::new(),
-                    };
+                        description: Some(format!("From memo: {}", memo_name)),
+                    });
 
-                    match cal.put_vtodo(&mapping.caldav_href, &vtodo, Some(&mapping.vtodo_etag)).await {
+                    match cal.put_item(&mapping.caldav_href, &item, Some(&mapping.caldav_etag)).await {
                         Ok(new_etag) => {
                             self.db.upsert_mapping(
-                                &memo_id, task_idx,
+                                memo_id, idx, sync_type,
                                 &mapping.caldav_uid, &mapping.caldav_href,
-                                &content_hash, &new_etag, task.done,
+                                content_hash, &new_etag, task.done,
                             ).await?;
                         }
-                        Err(e) => warn!("update VTODO {} failed: {}", mapping.caldav_uid, e),
+                        Err(e) => warn!("update {} {} failed: {}", sync_type, mapping.caldav_uid, e),
                     }
                 }
-                existing_indices.remove(&task_idx);
+                existing_indices.remove(&idx);
             } else {
-                let uid = parser::task_uid(&memo_id, task.index);
+                let uid = parser::task_uid(memo_id, task.index);
                 let href = format!("{}.ics", uid);
-                let new_status = if task.done {
-                    VTodoStatus::Completed
-                } else {
-                    VTodoStatus::NeedAction
-                };
-
-                let vtodo = VTodo {
+                let new_status = if task.done { VTodoStatus::Completed } else { VTodoStatus::NeedAction };
+                let item = CalDavItem::Todo(VTodo {
                     uid: uid.clone(),
                     summary: task.text.clone(),
                     status: new_status,
                     due: task.due_date.clone(),
                     priority: task.priority,
-                    description: Some(format!("From memo: {}", memo.name)),
-                    ical_data: String::new(),
-                };
+                    description: Some(format!("From memo: {}", memo_name)),
+                });
 
-                match cal.put_vtodo(&href, &vtodo, None).await {
+                match cal.put_item(&href, &item, None).await {
                     Ok(etag) => {
                         self.db.upsert_mapping(
-                            &memo_id, task_idx,
+                            memo_id, idx, sync_type,
                             &uid, &href,
-                            &content_hash, &etag, task.done,
+                            content_hash, &etag, task.done,
                         ).await?;
                         info!("created VTODO {} for memo {} task {}", uid, memo_id, task.index);
                     }
@@ -190,9 +198,104 @@ impl SyncService {
 
         for orphan_idx in existing_indices {
             if let Some(mapping) = index_map.get(&orphan_idx) {
-                let _ = cal.delete_vtodo(&mapping.caldav_href).await;
+                let _ = cal.delete_item(&mapping.caldav_href).await;
                 self.db.delete_mapping(&mapping.caldav_uid).await?;
-                info!("deleted orphan VTODO {} (task removed from memo)", mapping.caldav_uid);
+                info!("deleted orphan {} {} (item removed from memo)", sync_type, mapping.caldav_uid);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sync event items (VEVENT) for a memo.
+    async fn sync_events(
+        &self,
+        cal: &CalDavClient,
+        memo_id: &str,
+        memo_name: &str,
+        content_hash: &str,
+        events: &[parser::ParsedEvent],
+    ) -> Result<()> {
+        let sync_type = "event";
+        let existing_mappings = self.db.get_mappings_for_memo_by_type(memo_id, sync_type).await?;
+
+        if events.is_empty() && !existing_mappings.is_empty() {
+            info!("memo {} has no events, removing {} existing VEVENTs", memo_id, existing_mappings.len());
+            for mapping in &existing_mappings {
+                let _ = cal.delete_item(&mapping.caldav_href).await;
+                self.db.delete_mapping(&mapping.caldav_uid).await?;
+            }
+            return Ok(());
+        }
+
+        let mut index_map: std::collections::HashMap<i64, &super::db::SyncMapping> = std::collections::HashMap::new();
+        for m in &existing_mappings {
+            index_map.insert(m.item_index, m);
+        }
+
+        let mut existing_indices: std::collections::HashSet<i64> = index_map.keys().cloned().collect();
+
+        for event in events {
+            let idx = event.index as i64;
+
+            if let Some(mapping) = index_map.get(&idx) {
+                let changed = mapping.memo_text_hash != content_hash;
+
+                if changed {
+                    let dtstart = format!("{}{}", event.date, event.time.as_deref().map(|t| format!("T{}Z", t)).unwrap_or_default());
+                    let item = CalDavItem::Event(VEvent {
+                        uid: mapping.caldav_uid.clone(),
+                        summary: event.summary.clone(),
+                        dtstart,
+                        dtend: None,
+                        description: Some(format!("From memo: {}", memo_name)),
+                        all_day: event.all_day,
+                    });
+
+                    match cal.put_item(&mapping.caldav_href, &item, Some(&mapping.caldav_etag)).await {
+                        Ok(new_etag) => {
+                            self.db.upsert_mapping(
+                                memo_id, idx, sync_type,
+                                &mapping.caldav_uid, &mapping.caldav_href,
+                                content_hash, &new_etag, false,
+                            ).await?;
+                        }
+                        Err(e) => warn!("update VEVENT {} failed: {}", mapping.caldav_uid, e),
+                    }
+                }
+                existing_indices.remove(&idx);
+            } else {
+                let uid = parser::event_uid(memo_id, event.index);
+                let href = format!("{}.ics", uid);
+                let dtstart = format!("{}{}", event.date, event.time.as_deref().map(|t| format!("T{}Z", t)).unwrap_or_default());
+                let item = CalDavItem::Event(VEvent {
+                    uid: uid.clone(),
+                    summary: event.summary.clone(),
+                    dtstart,
+                    dtend: None,
+                    description: Some(format!("From memo: {}", memo_name)),
+                    all_day: event.all_day,
+                });
+
+                match cal.put_item(&href, &item, None).await {
+                    Ok(etag) => {
+                        self.db.upsert_mapping(
+                            memo_id, idx, sync_type,
+                            &uid, &href,
+                            content_hash, &etag, false,
+                        ).await?;
+                        info!("created VEVENT {} for memo {} event {}", uid, memo_id, event.index);
+                    }
+                    Err(e) => warn!("create VEVENT failed for {}: {}", uid, e),
+                }
+            }
+        }
+
+        for orphan_idx in existing_indices {
+            if let Some(mapping) = index_map.get(&orphan_idx) {
+                let _ = cal.delete_item(&mapping.caldav_href).await;
+                self.db.delete_mapping(&mapping.caldav_uid).await?;
+                info!("deleted orphan VEVENT {} (event removed from memo)", mapping.caldav_uid);
             }
         }
 
@@ -206,7 +309,7 @@ impl SyncService {
         }
         let cal = self.caldav.as_ref().unwrap();
 
-        let resources = cal.list_vtodos().await?;
+        let resources = cal.list_items().await?;
 
         for resource in &resources {
             if !resource.href.ends_with(".ics") {
@@ -216,52 +319,55 @@ impl SyncService {
             let full_resource = if resource.data.is_some() {
                 resource.clone()
             } else {
-                match cal.get_vtodo(&resource.href).await? {
+                match cal.get_item(&resource.href).await? {
                     Some(r) => r,
                     None => continue,
                 }
             };
 
-            let vtodo_data = match &full_resource.data {
+            let ical_data = match &full_resource.data {
                 Some(d) => d,
                 None => continue,
             };
 
-            let vtodo = match caldav::parse_vtodo(vtodo_data) {
-                Some(v) => v,
+            let item = match caldav::parse_ical(ical_data) {
+                Some(i) => i,
                 None => continue,
             };
 
-            if let Some(mapping) = self.db.get_mapping_by_uid(&vtodo.uid).await? {
-                if mapping.done != (vtodo.status == VTodoStatus::Completed) || mapping.vtodo_etag != full_resource.etag {
+            let (uid, item_done) = match &item {
+                CalDavItem::Todo(vt) => (vt.uid.clone(), vt.status == VTodoStatus::Completed),
+                CalDavItem::Event(_) => continue, // events are one-way (memo → CalDAV)
+            };
+
+            if let Some(mapping) = self.db.get_mapping_by_uid(&uid).await? {
+                if mapping.done != item_done || mapping.caldav_etag != full_resource.etag {
                     let memo = self.memos.get_memo(&format!("memos/{}", mapping.memo_id)).await?;
-                    let new_done = vtodo.status == VTodoStatus::Completed;
                     let tasks = parser::parse_tasks(&memo.content);
 
-                    if let Some(task) = tasks.iter().find(|t| t.index as i64 == mapping.task_index) {
-                        if task.done != new_done {
+                    if let Some(task) = tasks.iter().find(|t| t.index as i64 == mapping.item_index) {
+                        if task.done != item_done {
                             let (new_content, changed) = parser::replace_task_line(
-                                &memo.content, task.line_number, new_done, &task.text
+                                &memo.content, task.line_number, item_done, &task.text
                             );
                             if changed {
                                 if let Err(e) = self.memos.update_memo(&memo.name, &new_content).await {
                                     warn!("failed to update memo from CalDAV: {}", e);
                                 } else {
                                     info!("updated memo {} from CalDAV change", memo.name);
-                                    self.db.update_mapping_done(&vtodo.uid, new_done).await?;
+                                    self.db.update_done(&uid, item_done).await?;
                                 }
                             }
                         } else {
-                            self.db.update_mapping_etag(&vtodo.uid, &full_resource.etag).await?;
+                            self.db.update_etag(&uid, &full_resource.etag).await?;
                         }
                     }
                 }
             } else {
-                info!("unknown VTODO {} in CalDAV, skipping", vtodo.uid);
+                info!("unknown item {} in CalDAV, skipping", uid);
             }
         }
 
-        self.db.update_sync_state(false).await?;
         Ok(())
     }
 }

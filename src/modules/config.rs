@@ -39,9 +39,7 @@ pub struct CalDavConfig {
     pub poll_secs: u64,
 }
 
-fn default_memos_url() -> String {
-    "https://memos.junilab.xyz".into()
-}
+fn default_memos_url() -> String { "https://memos.junilab.xyz".into() }
 fn default_autotag_interval() -> u64 { 60 }
 fn default_autotag_tag() -> String { "inbox".into() }
 fn default_db_path() -> String { "memotag.db".into() }
@@ -61,7 +59,6 @@ impl Config {
             Self::from_env()
         };
 
-        // Env vars override config file values
         if let Ok(v) = std::env::var("MEMOS_URL") { cfg.memos_url = v; }
         if let Ok(v) = std::env::var("MEMOS_API_TOKEN") { cfg.memos_token = v; }
         if let Ok(v) = std::env::var("AUTOTAG_INTERVAL") { cfg.autotag_interval = v.parse().unwrap_or(cfg.autotag_interval); }
@@ -104,15 +101,5 @@ impl Config {
 impl CalDavConfig {
     pub fn is_configured(&self) -> bool {
         self.enabled && !self.url.is_empty() && !self.username.is_empty()
-    }
-
-    pub fn collection_url(&self) -> String {
-        format!("{}/{}", self.url.trim_end_matches('/'), self.path.trim_start_matches('/'))
-    }
-
-    pub fn auth_header(&self) -> String {
-        use base64::Engine;
-        let creds = format!("{}:{}", self.username, self.password);
-        format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(creds))
     }
 }

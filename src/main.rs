@@ -61,13 +61,6 @@ async fn main() -> Result<()> {
         let memos = modules::memos::MemosClient::new(config.memos_url.clone(), config.memos_token.clone());
         let autotagger = modules::autotag::Autotagger::new(
             memos, config.autotag_default_tag.clone(), config.autotag_interval,
-            std::env::var("VIKUNJA_URL").unwrap_or_else(|_| "http://vikunja:3456".to_string()),
-            std::env::var("VIKUNJA_USER").unwrap_or_else(|_| "asher".to_string()),
-            std::env::var("VIKUNJA_PASS").unwrap_or_else(|_| "asher123".to_string()),
-            std::env::var("VIKUNJA_PROJECT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
-            std::env::var("RADICALE_URL").unwrap_or_else(|_| "http://radicale:5232".to_string()),
-            std::env::var("RADICALE_USER").unwrap_or_else(|_| "asher".to_string()),
-            std::env::var("RADICALE_PASS").unwrap_or_else(|_| "asher123".to_string()),
         );
         return autotagger.clean_junk_hashtags().await;
     }
@@ -117,13 +110,6 @@ async fn main() -> Result<()> {
         );
         let autotagger = modules::autotag::Autotagger::new(
             memos, autotag_config.autotag_default_tag.clone(), autotag_config.autotag_interval,
-            std::env::var("VIKUNJA_URL").unwrap_or_else(|_| "http://vikunja:3456".to_string()),
-            std::env::var("VIKUNJA_USER").unwrap_or_else(|_| "asher".to_string()),
-            std::env::var("VIKUNJA_PASS").unwrap_or_else(|_| "asher123".to_string()),
-            std::env::var("VIKUNJA_PROJECT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
-            std::env::var("RADICALE_URL").unwrap_or_else(|_| "http://radicale:5232".to_string()),
-            std::env::var("RADICALE_USER").unwrap_or_else(|_| "asher".to_string()),
-            std::env::var("RADICALE_PASS").unwrap_or_else(|_| "asher123".to_string()),
         );
         if let Err(e) = autotagger.run().await {
             warn!("autotagger exited: {}", e);
