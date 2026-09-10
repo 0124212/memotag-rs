@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,10 +42,27 @@ pub struct MemosClient {
     api_token: String,
 }
 
+/// pageSize for list calls. 200 balances throughput vs. the 32M box on oracle.
+pub const MEMOS_PAGE_SIZE: usize = 200;
+
+impl Clone for MemosClient {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            api_token: self.api_token.clone(),
+        }
+    }
+}
+
 impl MemosClient {
     pub fn new(base_url: String, api_token: String) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             base_url,
             api_token,
         }
@@ -60,7 +78,7 @@ impl MemosClient {
     }
 
     pub async fn list_memos(&self, page_token: Option<&str>) -> Result<(Vec<Memo>, Option<String>)> {
-        let mut url = format!("{}/api/v1/memos?pageSize=50", self.base_url);
+        let mut url = format!("{}/api/v1/memos?pageSize={}", self.base_url, MEMOS_PAGE_SIZE);
         if let Some(token) = page_token {
             let encoded = token.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
             url.push_str(&format!("&pageToken={}", encoded));

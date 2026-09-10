@@ -56,13 +56,34 @@ async fn main() -> Result<()> {
 
     let clean_mode = std::env::args().any(|a| a == "--clean");
     let sync_only = std::env::args().any(|a| a == "--sync");
+    let dry_run = std::env::args().any(|a| a == "--dry-run");
+    // --dry-run implies a single pass: log what would change, write nothing.
+    let once_mode = std::env::args().any(|a| a == "--once") || dry_run;
 
     if clean_mode {
         let memos = modules::memos::MemosClient::new(config.memos_url.clone(), config.memos_token.clone());
         let autotagger = modules::autotag::Autotagger::new(
-            memos, config.autotag_default_tag.clone(), config.autotag_interval,
+            memos,
+            config.autotag_default_tag.clone(),
+            config.autotag_interval,
+            config.autotag_concurrency,
         );
-        return autotagger.clean_junk_hashtags().await;
+        return autotagger.clean_junk_hashtags(dry_run).await;
+    }
+
+    // Test/sandbox escape hatch: single autotag pass against MEMOS_URL, then
+    // exit. Point MEMOS_URL at the debian dummy (127.0.0.1:5230) first.
+    if once_mode {
+        let memos = modules::memos::MemosClient::new(config.memos_url.clone(), config.memos_token.clone());
+        let autotagger = modules::autotag::Autotagger::new(
+            memos,
+            config.autotag_default_tag.clone(),
+            config.autotag_interval,
+            config.autotag_concurrency,
+        );
+        let (scanned, changed) = autotagger.run_once(dry_run).await?;
+        info!("once mode done: scanned={} changed={} dry_run={}", scanned, changed, dry_run);
+        return Ok(());
     }
 
     let db = Database::open(&config.db_path)?;
@@ -109,7 +130,10 @@ async fn main() -> Result<()> {
             autotag_config.memos_url.clone(), autotag_config.memos_token.clone(),
         );
         let autotagger = modules::autotag::Autotagger::new(
-            memos, autotag_config.autotag_default_tag.clone(), autotag_config.autotag_interval,
+            memos,
+            autotag_config.autotag_default_tag.clone(),
+            autotag_config.autotag_interval,
+            autotag_config.autotag_concurrency,
         );
         if let Err(e) = autotagger.run().await {
             warn!("autotagger exited: {}", e);

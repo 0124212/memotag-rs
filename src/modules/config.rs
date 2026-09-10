@@ -12,6 +12,10 @@ pub struct Config {
     pub autotag_interval: u64,
     #[serde(default = "default_autotag_tag")]
     pub autotag_default_tag: String,
+    /// Max concurrent memo PATCHes per pass. Honours AUTOTAG_CONCURRENCY,
+    /// with AUTOTAG_BATCH_SIZE as a legacy alias (prod sets =25).
+    #[serde(default = "default_autotag_concurrency")]
+    pub autotag_concurrency: usize,
 
     #[serde(default)]
     pub caldav: CalDavConfig,
@@ -42,6 +46,7 @@ pub struct CalDavConfig {
 fn default_memos_url() -> String { "https://memos.junilab.xyz".into() }
 fn default_autotag_interval() -> u64 { 60 }
 fn default_autotag_tag() -> String { "inbox".into() }
+fn default_autotag_concurrency() -> usize { 8 }
 fn default_db_path() -> String { "memotag.db".into() }
 fn default_listen_port() -> u16 { 8887 }
 fn default_caldav_url() -> String { "http://radicale:5232".into() }
@@ -63,6 +68,11 @@ impl Config {
         if let Ok(v) = std::env::var("MEMOS_API_TOKEN") { cfg.memos_token = v; }
         if let Ok(v) = std::env::var("AUTOTAG_INTERVAL") { cfg.autotag_interval = v.parse().unwrap_or(cfg.autotag_interval); }
         if let Ok(v) = std::env::var("AUTOTAG_DEFAULT_TAG") { cfg.autotag_default_tag = v; }
+        if let Ok(v) = std::env::var("AUTOTAG_CONCURRENCY")
+            .or_else(|_| std::env::var("AUTOTAG_BATCH_SIZE"))
+        {
+            cfg.autotag_concurrency = v.parse().unwrap_or(cfg.autotag_concurrency).clamp(1, 32);
+        }
         if let Ok(v) = std::env::var("DB_PATH") { cfg.db_path = v; }
         if let Ok(v) = std::env::var("LISTEN_PORT") { cfg.listen_port = v.parse().unwrap_or(cfg.listen_port); }
         if let Ok(v) = std::env::var("CALDAV_ENABLED") { cfg.caldav.enabled = v == "true" || v == "1"; }
@@ -82,6 +92,11 @@ impl Config {
             autotag_interval: std::env::var("AUTOTAG_INTERVAL")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(default_autotag_interval()),
             autotag_default_tag: std::env::var("AUTOTAG_DEFAULT_TAG").unwrap_or_else(|_| default_autotag_tag()),
+            autotag_concurrency: std::env::var("AUTOTAG_CONCURRENCY")
+                .or_else(|_| std::env::var("AUTOTAG_BATCH_SIZE"))
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default_autotag_concurrency()),
             caldav: CalDavConfig {
                 enabled: std::env::var("CALDAV_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false),
                 url: std::env::var("CALDAV_URL").unwrap_or_else(|_| default_caldav_url()),
