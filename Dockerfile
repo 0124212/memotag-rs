@@ -3,7 +3,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev gcc && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release
+# --bin keeps the offline `scan` pitfall-hunter out of the prod image.
+RUN cargo build --release --bin memotag-rs
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*

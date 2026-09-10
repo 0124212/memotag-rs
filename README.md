@@ -9,14 +9,17 @@ auto-tagging plus CalDAV task/event sync. Prod runs on ubuntu/oracle as
 Memos 0.30 treats `tags` as **output-only** (parsed from `#tags` in content),
 so the tagger PATCHes `content`, never a tags field.
 
-- `link` — bare `https://…` URLs
+- `code` — any fenced block (` ``` `, bare or any language)
+- `diagram` — fenced ` ```mermaid ` blocks
+- `math` — `$$…$$` or `\frac`-style commands
+- `event` — `📅 YYYY-MM-DD` lines (same parser as the CalDAV sync)
+- `task` — `- [ ]` / `- [x]` anywhere: indented, `*`/`+`, numbered
+- `quote` — `> blockquote` on any line, incl. indented
+- `link` — bare `https://…` URLs; known video hosts also imply `video`
 - `image` — markdown `![](…)`, `<img>`, image extensions (also via attachments)
 - `figure` — markdown-image syntax or `<figure>`/`<img>` HTML
 - `table` — `|…|` rows plus a `---` separator
 - `audio` / `video` — media extensions (also via attachments)
-- `code` — any fenced block (` ``` `, bare or any language)
-- `task` — `- [ ]` / `- [x]` anywhere: indented, `*`/`+`, numbered
-- `quote` — `> blockquote` on any line, incl. indented
 - `<ext>` — known file extensions (`pdf`, `rs`, `mp3`, …) as extra tags
 - fallback `inbox` (configurable) only for memos with **no** tags at all
 
@@ -59,8 +62,20 @@ MEMOS_URL=http://127.0.0.1:5230 MEMOS_API_TOKEN=$MEMOS_TEST_PAT \
 python3 verify.py        # must PASS before any ubuntu deploy
 ```
 
-`cargo test` runs 17 autotag unit tests (no server needed). Two unrelated
+`cargo test` runs 18 autotag unit tests (no server needed). Two unrelated
 tests (caldav vevent, parser priority) fail on `main` — pre-existing, untouched.
+
+## Pitfall hunting (`scan` binary, not shipped in the image)
+
+```bash
+cargo run --bin scan -- /root/memos-test/prod-copy/memos_prod_copy.db
+```
+
+Runs the tagger's pure logic over a read-only DB copy: would-change counts,
+per-tag backfill stats, URL-fragment phantoms, fold-targets-inside-fences,
+and — critically — non-convergent memos (output that would rewrite forever).
+Exit 1 on non-convergence or fence hazards. Proven on prod data:
+40 would-change / 0 non-convergent / 0 fence hazards.
 
 ## Deploy (ubuntu)
 

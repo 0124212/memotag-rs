@@ -1,4 +1,4 @@
-mod modules;
+use memotag_rs::modules;
 
 use anyhow::Result;
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};

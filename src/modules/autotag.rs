@@ -7,6 +7,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use super::memos::{Memo, MemosClient};
+use super::parser;
 
 // ─── Compiled once, shared by all instances ─────────────────────────────
 // (?m) matters: ^ must match line starts, not just content start.
@@ -41,6 +42,17 @@ static RE_TASK: LazyLock<Regex> = LazyLock::new(|| {
 /// Quotes anywhere, incl. indented.
 static RE_QUOTE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*>").unwrap());
+/// Mermaid diagrams (fenced ```mermaid) → #diagram.
+static RE_MERMAID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*```mermaid").unwrap());
+/// Inline/display math: $$…$$ or \(frac|sum|…) commands → #math.
+static RE_MATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$\$.+?\$\$|\\(frac|sum|int|sqrt|alpha|beta|gamma|theta|lambda)\b").unwrap()
+});
+/// Known video hosts count as video even without a file extension.
+static RE_VIDEO_SITE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com|twitch\.tv)").unwrap()
+});
 static RE_FILE_EXT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\.([a-z]{2,10})(?:\s|$|\)|\]|\?)").unwrap()
 });
@@ -190,6 +202,9 @@ impl Autotagger {
         if has_url && RE_LINK.is_match(&clean) {
             push("link");
         }
+        if has_url && RE_VIDEO_SITE.is_match(&clean) {
+            push("video");
+        }
         if RE_IMAGE.is_match(&clean) {
             push("image");
         }
@@ -207,6 +222,16 @@ impl Autotagger {
         }
         if has_fence && RE_CODE.is_match(&clean) {
             push("code");
+        }
+        if has_fence && RE_MERMAID.is_match(&clean) {
+            push("diagram");
+        }
+        if (clean.contains("$$") || clean.contains("\\frac")) && RE_MATH.is_match(&clean) {
+            push("math");
+        }
+        // Calendar events (📅 lines) — the other half of the CalDAV sync.
+        if clean.contains('📅') && !parser::parse_events(&clean).is_empty() {
+            push("event");
         }
         if RE_TASK.is_match(&clean) {
             push("task");
@@ -233,7 +258,9 @@ impl Autotagger {
         tags
     }
 
-    fn existing_hashtags(content: &str) -> HashSet<String> {
+    /// Hashtags the server would index for this content (lowercased,
+    /// trailing punctuation stripped). Pub for the offline `scan` binary.
+    pub fn existing_hashtags(content: &str) -> HashSet<String> {
         RE_HASHTAG
             .captures_iter(content)
             .map(|c| clean_tag(&c[2]))
@@ -244,7 +271,8 @@ impl Autotagger {
     /// Build the new content for one memo. Returns None when already converged
     /// (no write needed). Single pass: folds + inbox cleanup + appends combine
     /// into ONE content string so each memo costs at most one PATCH.
-    fn build_new_content(&self, memo: &Memo) -> Option<(String, Vec<String>)> {
+    /// Pub for the offline `scan` binary (pitfall hunting on DB copies).
+    pub fn build_new_content(&self, memo: &Memo) -> Option<(String, Vec<String>)> {
         let (mut new_content, _) = fold_renames(&memo.content);
 
         let existing = Self::existing_hashtags(&new_content);
@@ -589,6 +617,30 @@ mod tests {
         ] {
             assert!(detected(c).contains(&"quote".to_string()), "miss: {:?}", c);
         }
+    }
+
+    #[test]
+    fn events_math_diagrams_video_sites() {
+        // Calendar events (mirrors the CalDAV parser, not just the emoji).
+        assert!(detected("📅 2026-04-15 Doctor appointment").contains(&"event".to_string()));
+        assert!(detected("📅 2026-04-15 14:30 Standup").contains(&"event".to_string()));
+        // Bare emoji with no date is not an event.
+        assert!(!detected("I love 📅 emojis").contains(&"event".to_string()));
+        // Math.
+        assert!(detected("result $$x^2 + y$$ ok").contains(&"math".to_string()));
+        assert!(detected("use \\frac{a}{b} here").contains(&"math".to_string()));
+        assert!(!detected("price is 5 dollars").contains(&"math".to_string()));
+        assert!(!detected("print this").contains(&"math".to_string()));
+        // Mermaid diagrams (also still #code — it is a fence).
+        let d = detected("```mermaid\ngraph TD\n```");
+        assert!(d.contains(&"diagram".to_string()));
+        assert!(d.contains(&"code".to_string()));
+        // Video sites → video (+link).
+        let v = detected("watch https://www.youtube.com/watch?v=abc123");
+        assert!(v.contains(&"video".to_string()));
+        assert!(v.contains(&"link".to_string()));
+        let v2 = detected("clip https://vimeo.com/12345");
+        assert!(v2.contains(&"video".to_string()));
     }
 
     #[test]
