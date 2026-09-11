@@ -92,7 +92,8 @@ impl CalDavClient {
         }
     }
 
-    /// Create the collection if it doesn't exist (MKCALENDAR).
+    /// Create the collection if it doesn't exist (MKCALENDAR with MKCOL fallback).
+    /// Handles Radicale quirks: 409 on PROPFIND, 405 on MKCALENDAR, MKCOL fallback.
     pub async fn ensure_collection(&self) -> Result<()> {
         let resp = self.client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &self.collection_url)
@@ -107,7 +108,8 @@ impl CalDavClient {
                 info!("calDAV collection exists: {}", self.collection_url);
                 return Ok(());
             }
-            Ok(r) if r.status().as_u16() == 404 => {
+            Ok(r) if r.status().as_u16() == 404 || r.status().as_u16() == 409 => {
+                // 404 = not found, 409 = conflict (Radicale may return this for nonexistent collection)
                 info!("creating CalDAV collection: {}", self.collection_url);
             }
             Ok(r) => {
@@ -118,6 +120,7 @@ impl CalDavClient {
             }
         }
 
+        // Try MKCALENDAR first
         let resp = self.client
             .request(reqwest::Method::from_bytes(b"MKCALENDAR").unwrap(), &self.collection_url)
             .header("Authorization", &self.auth)
@@ -126,18 +129,38 @@ impl CalDavClient {
             .await
             .context("MKCALENDAR request")?;
 
-        if resp.status().is_success() || resp.status().as_u16() == 201 {
-            info!("created CalDAV collection");
+        let mkcal_status = resp.status();
+        if mkcal_status.is_success() || mkcal_status.as_u16() == 201 {
+            info!("created CalDAV collection via MKCALENDAR");
+            return Ok(());
+        }
+
+        // 405 = Method Not Allowed (Radicale), 409 = Conflict (already exists) — both are fine
+        if mkcal_status.as_u16() == 405 || mkcal_status.as_u16() == 409 {
+            info!("MKCALENDAR returned {} (collection likely exists), treating as OK", mkcal_status);
+            return Ok(());
+        }
+
+        let mkcal_body = resp.text().await.unwrap_or_default();
+        warn!("MKCALENDAR failed {}: {}", mkcal_status, &mkcal_body[..mkcal_body.len().min(300)]);
+
+        // Fall back to MKCOL (basic DAV collection) — Radicale prefers this
+        warn!("falling back to MKCOL for collection creation");
+        let resp = self.client
+            .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &self.collection_url)
+            .header("Authorization", &self.auth)
+            .body(MKCOL_BODY.to_string())
+            .send()
+            .await
+            .context("MKCOL fallback request")?;
+
+        let mkcol_status = resp.status();
+        if mkcol_status.is_success() || mkcol_status.as_u16() == 201 || mkcol_status.as_u16() == 405 || mkcol_status.as_u16() == 409 {
+            info!("MKCOL returned {} — collection ready", mkcol_status);
             Ok(())
         } else {
-            let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("MKCALENDAR failed {}: {}", status, &body[..body.len().min(300)]);
-            if status.as_u16() == 405 {
-                Ok(())
-            } else {
-                anyhow::bail!("MKCALENDAR failed: {}", status)
-            }
+            anyhow::bail!("MKCOL failed: {} {}", mkcol_status, &body[..body.len().min(200)])
         }
     }
 
@@ -162,9 +185,33 @@ impl CalDavClient {
         parse_multistatus(&body)
     }
 
+    /// Get the collection path (relative to server root, e.g. "user/calendar_name").
+    pub fn collection_path(&self) -> &str {
+        // collection_url is "{base_url}/{collection_path}", strip the base_url prefix
+        self.collection_url
+            .strip_prefix(&self.base_url)
+            .map(|s| s.trim_start_matches('/'))
+            .unwrap_or("")
+    }
+
     /// Get a single calendar item by href.
+    /// Handles both Radicale format (collection/uid.ics) and bare format (uid.ics).
     pub async fn get_item(&self, href: &str) -> Result<Option<CalDavResource>> {
-        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), href.trim_start_matches('/'));
+        // Build the full URL: try href as-is first, fall back to collection_path/href
+        let url = if href.starts_with(&self.base_url) {
+            href.to_string()
+        } else if href.contains('/') && !href.starts_with('/') {
+            // Already contains path segments (e.g. "calendar_name/uid.ics") — use relative to base
+            format!("{}/{}", self.base_url.trim_end_matches('/'), href)
+        } else {
+            // Bare filename (e.g. "uid.ics") — prepend collection path for Radicale
+            let path = self.collection_path();
+            if path.is_empty() {
+                format!("{}/{}", self.base_url.trim_end_matches('/'), href)
+            } else {
+                format!("{}/{}/{}", self.base_url.trim_end_matches('/'), path, href)
+            }
+        };
         let resp = self.client
             .get(&url)
             .header("Authorization", &self.auth)
@@ -288,14 +335,31 @@ pub fn build_vevent_ical(event: &VEvent) -> String {
         format!("DTSTART;VALUE=DATE:{}", event.dtstart.replace('-', ""))
     } else {
         // Timed event: format YYYYMMDDTHHMMSSZ
-        format!("DTSTART:{}", event.dtstart.replace('-', "").replace('T', "").trim_end_matches('Z'))
+        // Input may be "2026-04-15T09:00:00Z" or "2026-04-15T09:00:00+00:00"
+        let cleaned = event.dtstart.replace('-', "").replace(':', "")
+            .trim_end_matches(|c: char| c == 'Z' || c == '+')
+            .to_string();
+        let has_tz = event.dtstart.ends_with('Z') || event.dtstart.contains('+');
+        if has_tz {
+            format!("DTSTART:{}Z", cleaned)
+        } else {
+            format!("DTSTART:{}", cleaned)
+        }
     };
 
     let dtend = if let Some(ref end) = event.dtend {
         if event.all_day {
             format!("\r\nDTEND;VALUE=DATE:{}", end.replace('-', ""))
         } else {
-            format!("\r\nDTEND:{}", end.replace('-', "").replace('T', "").trim_end_matches('Z'))
+            let cleaned = end.replace('-', "").replace(':', "")
+                .trim_end_matches(|c: char| c == 'Z' || c == '+')
+                .to_string();
+            let has_tz = end.ends_with('Z') || end.contains('+');
+            if has_tz {
+                format!("\r\nDTEND:{}Z", cleaned)
+            } else {
+                format!("\r\nDTEND:{}", cleaned)
+            }
         }
     } else {
         String::new()
@@ -461,13 +525,18 @@ fn parse_multistatus(xml: &str) -> Result<Vec<CalDavResource>> {
 // ─── CalDAV XML bodies ────────────────────────────────────────────────
 
 /// REPORT body: fetch ALL calendar items (VTODO + VEVENT).
+/// Radicale requires comp-filter to be inside a calendar-query wrapper.
 const CALDAV_REPORT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:report xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop>
-    <d:getetag/>
-    <c:calendar-data/>
-  </d:prop>
-  <c:comp-filter name="VCALENDAR"/>
+  <c:calendar-query>
+    <d:prop>
+      <d:getetag/>
+      <c:calendar-data/>
+    </d:prop>
+    <c:filter>
+      <c:comp-filter name="VCALENDAR"/>
+    </c:filter>
+  </c:calendar-query>
 </d:report>"#;
 
 const CALENDAR_PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -492,6 +561,25 @@ const MKCALENDAR_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     </d:prop>
   </d:set>
 </c:mkcalendar>"#;
+
+/// MKCOL fallback body: create a basic DAV collection that Radicale can use as a calendar.
+const MKCOL_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:mkcol xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:set>
+    <d:prop>
+      <d:displayname>Memos</d:displayname>
+      <d:resourcetype>
+        <d:collection/>
+        <c:calendar/>
+      </d:resourcetype>
+      <c:calendar-description>Tasks and events synced from memos</c:calendar-description>
+      <c:supported-component-set>
+        <c:comp name="VTODO"/>
+        <c:comp name="VEVENT"/>
+      </c:supported-component-set>
+    </d:prop>
+  </d:set>
+</d:mkcol>"#;
 
 #[cfg(test)]
 mod tests {

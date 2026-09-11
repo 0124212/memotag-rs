@@ -35,7 +35,7 @@ static RE_DUE_DATE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RE_PRIORITY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:🔴|🟡|🟢|p(\d))").unwrap()
+    Regex::new(r"(🔴|🟡|🟢|p(\d))").unwrap()
 });
 
 static RE_TAG: LazyLock<Regex> = LazyLock::new(|| {
@@ -64,8 +64,19 @@ pub fn parse_tasks(content: &str) -> Vec<ParsedTask> {
             let due_date = RE_DUE_DATE.captures(&text)
                 .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
 
-            let priority = RE_PRIORITY.captures(&text)
-                .and_then(|c| c.get(1).and_then(|m| m.as_str().parse().ok()));
+            let priority = RE_PRIORITY.captures(&text).and_then(|c| {
+                // Group 2 = digit after "p", Group 1 = emoji or full match
+                if let Some(digit) = c.get(2) {
+                    digit.as_str().parse().ok()
+                } else {
+                    match c.get(1)?.as_str() {
+                        "🔴" => Some(1),
+                        "🟡" => Some(5),
+                        "🟢" => Some(9),
+                        _ => None,
+                    }
+                }
+            });
 
             let tags = RE_TAG.captures_iter(&text)
                 .map(|c| c[1].to_string())

@@ -171,7 +171,12 @@ impl SyncService {
                 existing_indices.remove(&idx);
             } else {
                 let uid = parser::task_uid(memo_id, task.index);
-                let href = format!("{}.ics", uid);
+                let collection = cal.collection_path();
+                let href = if collection.is_empty() {
+                    format!("{}.ics", uid)
+                } else {
+                    format!("{}/{}.ics", collection, uid)
+                };
                 let new_status = if task.done { VTodoStatus::Completed } else { VTodoStatus::NeedAction };
                 let item = CalDavItem::Todo(VTodo {
                     uid: uid.clone(),
