@@ -77,6 +77,85 @@ static RE_JUNK_VER: LazyLock<Regex> =
 static RE_BLANK_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
+// ─── Language detection ────────────────────────────────────────────────────
+
+/// Fenced code block language hints: ```rust, ```python, etc.
+static RE_FENCED_LANG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*```([\w+-]+)").unwrap());
+
+// ─── Script/language syntax patterns ───────────────────────────────────────
+
+static RE_LANG_RUST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*fn\s+\w+|^\s*impl\s+\w+|^\s*pub\s+fn|^\s*use\s+\w+::|^\s*let\s+mut\s+|^\s*match\s+|^\s*struct\s+\w+|^\s*enum\s+\w+|^\s*trait\s+\w+|^\s*mod\s+\w+|^\s*crate::|^\s*#!\[|^\s*///|^\s*//!)").unwrap()
+});
+static RE_LANG_PYTHON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*def\s+\w+\s*\(|^\s*class\s+\w+[\s:(]|^\s*import\s+\w+|^\s*from\s+\w+\s+import|^\s*async\s+def|^\s*@\w+\.|^\s*print\s*\(|^\s*if\s+__name__|^\s*elif\s|^\s*yield\s|^\s*lambda\s|^\s*with\s+open)").unwrap()
+});
+static RE_LANG_JS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(^\s*const\s+\w+\s*=|^\s*let\s+\w+\s*=|^\s*var\s+\w+\s*=|^\s*function\s+\w+|^\s*=>\s*\{|^\s*require\s*\(|^\s*import\s+.*from\s+['"]|^\s*export\s+(default|const|function|class)|^\s*console\.\w+\()"#).unwrap()
+});
+static RE_LANG_GO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*func\s+\w+|^\s*package\s+\w+|^\s*import\s+\(|^\s*fmt\.|^\s*log\.|^\s*if\s+err\s*!=\s*nil|^\s*defer\s+|^\s*go\s+func|^\s*chan\s+|^\s*<-chan\s|^\s*<-\w+)").unwrap()
+});
+static RE_LANG_SQL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(^\s*SELECT\s|^\s*INSERT\s+INTO|^\s*UPDATE\s+\w+\s+SET|^\s*DELETE\s+FROM|^\s*CREATE\s+TABLE|^\s*ALTER\s+TABLE|^\s*DROP\s+TABLE|^\s*JOIN\s+\w+|^\s*WHERE\s|^\s*GROUP\s+BY|^\s*ORDER\s+BY|^\s*HAVING\s)").unwrap()
+});
+static RE_LANG_SHELL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^#!\s*/bin/(ba)?sh|^\s*echo\s|^\s*if\s+\[\s|^\s*for\s+\w+\s+in|^\s*while\s+\[|^\s*case\s+\w+\s+in|^\s*function\s+\w+\s*\{)").unwrap()
+});
+static RE_LANG_DOCKER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*FROM\s+\w|^\s*RUN\s+|^\s*COPY\s+|^\s*CMD\s+\[|^\s*ENTRYPOINT|^\s*ENV\s+\w+=|^\s*EXPOSE\s+\d|^\s*WORKDIR\s|^\s*ARG\s+\w+)").unwrap()
+});
+
+// ─── Script/language syntax patterns (additional) ──────────────────────────
+
+static RE_LANG_C: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*#include\s*<|^\s*int\s+main\s*\(|^\s*void\s+\w+\s*\(|^\s*printf\s*\(|^\s*malloc\s*\(|^\s*struct\s+\w+\s*\{)").unwrap()
+});
+static RE_LANG_CPP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*std::|^\s*cout\s*<<|^\s*cin\s*>>|^\s*template\s*<|^\s*namespace\s+\w+|^\s*using\s+namespace|^\s*class\s+\w+\s*\{)").unwrap()
+});
+static RE_LANG_JAVA: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*public\s+class\s+|^\s*private\s+|^\s*protected\s+|^\s*import\s+java\.|^\s*System\.out\.|^\s*public\s+static\s+void\s+main|^\s*@Override|^\s*try\s*\{)").unwrap()
+});
+static RE_LANG_RUBY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(^\s*def\s+\w+|^\s*class\s+\w+\s*<|^\s*module\s+\w+|^\s*puts\s|^\s*require\s+['"]|^\s*attr_|^\s*do\s*\|)"#).unwrap()
+});
+static RE_LANG_PHP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(<\?php|^\s*\$\w+\s*=|^\s*function\s+\w+\s*\(|^\s*echo\s|^\s*class\s+\w+\s*\{)").unwrap()
+});
+static RE_LANG_HTML: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(<!DOCTYPE|<html|<head|<body|<div|<span|<p\s|<a\s|<img\s|<form|<input)").unwrap()
+});
+static RE_LANG_CSS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*\.[a-zA-Z][\w-]*\s*\{|^\s*#[a-zA-Z][\w-]*\s*\{|^\s*@media|^\s*display\s*:|^\s*position\s*:|^\s*margin|^\s*padding|^\s*font-size|^\s*background)").unwrap()
+});
+static RE_LANG_YAML: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^\s*[\w.-]+\s*:\s+|^\s*-\s+\w+:|^\s*version\s*:\s|^\s*name\s*:\s|^\s*services\s*:|^\s*build\s*:)").unwrap()
+});
+static RE_LANG_JSON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^\s*\{|^\s*"[\w]+"\s*:\s*[\[{"\\d]|^\s*\}"#).unwrap()
+});
+static RE_LANG_LATEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(\\documentclass|\\begin\{|\\end\{|\\usepackage|\\section|\\textbf|\\textit|\\frac|\\int|\\sum|\\alpha|\\beta|\\gamma)").unwrap()
+});
+static RE_LANG_MARKDOWN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(^#{1,6}\s|^\s*\*\*\w|^\s*-\s+\[|^\s*\d+\.\s|^\s*>\s|^\s*```|^\s*\|.*\|)").unwrap()
+});
+
+// ─── CJK language detection ────────────────────────────────────────────────
+
+/// Korean (Hangul) characters: U+AC00-U+D7AF (syllables), U+1100-U+11FF (jamo), U+3130-U+318F (compat jamo)
+static RE_KOREAN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("[\u{AC00}-\u{D7AF}\u{1100}-\u{11FF}\u{3130}-\u{318F}]").unwrap());
+/// Japanese (Hiragana + Katakana): U+3040-U+309F, U+30A0-U+30FF
+static RE_JAPANESE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("[\u{3040}-\u{309F}\u{30A0}-\u{30FF}]").unwrap());
+/// Chinese CJK characters (U+4E00-U+9FFF) but NOT Japanese kana
+static RE_CHINESE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("[\u{4E00}-\u{9FFF}]").unwrap()
+});
+
 /// Trailing punctuation the server strips when parsing #tags.
 /// Without this we see `#link,` as tag `link,` and append a duplicate `#link`.
 fn clean_tag(raw: &str) -> String {
@@ -161,37 +240,6 @@ impl Autotagger {
 
     fn detect_tags(&self, memo: &Memo) -> Vec<String> {
         let mut tags = Vec::new();
-        let mut push = |t: &str| {
-            if !tags.iter().any(|x: &String| x == t) {
-                tags.push(t.to_string());
-            }
-        };
-
-        for att in &memo.attachments {
-            let mime = att.mime_type.to_lowercase();
-            let fname = att.filename.to_lowercase();
-            let is_image = mime.starts_with("image/")
-                || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "svg", "tiff", "tif", "ico"]
-                    .iter()
-                    .any(|e| fname.ends_with(&format!(".{}", e)));
-            let is_audio = mime.starts_with("audio/")
-                || ["mp3", "wav", "ogg", "m4a", "flac", "aac", "wma", "opus", "mid", "midi"]
-                    .iter()
-                    .any(|e| fname.ends_with(&format!(".{}", e)));
-            let is_video = mime.starts_with("video/")
-                || ["mp4", "mkv", "webm", "avi", "mov", "flv", "m4v", "3gp", "ogv"]
-                    .iter()
-                    .any(|e| fname.ends_with(&format!(".{}", e)));
-            if is_image {
-                push("image");
-            }
-            if is_audio {
-                push("audio");
-            }
-            if is_video {
-                push("video");
-            }
-        }
 
         // Cheap substring pre-filters before regex (fast path for plain notes).
         let clean = RE_ANSI.replace_all(&memo.content, "");
@@ -199,45 +247,178 @@ impl Autotagger {
         let has_fence = clean.contains("```");
         let has_pipe = clean.contains('|');
 
-        if has_url && RE_LINK.is_match(&clean) {
-            push("link");
+        // ─── Basic structural tags (scoped to drop the push closure) ──────
+        {
+            let mut push = |t: &str| {
+                if !tags.iter().any(|x| x == t) {
+                    tags.push(t.to_string());
+                }
+            };
+
+            for att in &memo.attachments {
+                let mime = att.mime_type.to_lowercase();
+                let fname = att.filename.to_lowercase();
+                let is_image = mime.starts_with("image/")
+                    || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "svg", "tiff", "tif", "ico"]
+                        .iter()
+                        .any(|e| fname.ends_with(&format!(".{}", e)));
+                let is_audio = mime.starts_with("audio/")
+                    || ["mp3", "wav", "ogg", "m4a", "flac", "aac", "wma", "opus", "mid", "midi"]
+                        .iter()
+                        .any(|e| fname.ends_with(&format!(".{}", e)));
+                let is_video = mime.starts_with("video/")
+                    || ["mp4", "mkv", "webm", "avi", "mov", "flv", "m4v", "3gp", "ogv"]
+                        .iter()
+                        .any(|e| fname.ends_with(&format!(".{}", e)));
+                if is_image {
+                    push("image");
+                }
+                if is_audio {
+                    push("audio");
+                }
+                if is_video {
+                    push("video");
+                }
+            }
+
+            if has_url && RE_LINK.is_match(&clean) {
+                push("link");
+            }
+            if has_url && RE_VIDEO_SITE.is_match(&clean) {
+                push("video");
+            }
+            if RE_IMAGE.is_match(&clean) {
+                push("image");
+            }
+            if has_pipe && RE_TABLE_ROW.is_match(&clean) && clean.contains("---") {
+                push("table");
+            }
+            if RE_FIGURE.is_match(&clean) {
+                push("figure");
+            }
+            if RE_AUDIO.is_match(&clean) {
+                push("audio");
+            }
+            if RE_VIDEO.is_match(&clean) {
+                push("video");
+            }
+            if has_fence && RE_CODE.is_match(&clean) {
+                push("code");
+            }
+            if has_fence && RE_MERMAID.is_match(&clean) {
+                push("diagram");
+            }
+            if (clean.contains("$$") || clean.contains("\\frac")) && RE_MATH.is_match(&clean) {
+                push("math");
+            }
+            // Calendar events (📅 lines) — the other half of the CalDAV sync.
+            if clean.contains('📅') && !parser::parse_events(&clean).is_empty() {
+                push("event");
+            }
+            if RE_TASK.is_match(&clean) {
+                push("task");
+            }
+            if RE_QUOTE.is_match(&clean) {
+                push("quote");
+            }
         }
-        if has_url && RE_VIDEO_SITE.is_match(&clean) {
-            push("video");
+        // push closure dropped here — tags is no longer mutably borrowed
+
+        // ─── Language detection: fenced code-block hints first ────────────
+        let mut lang_from_fence: Option<String> = None;
+        if has_fence {
+            for cap in RE_FENCED_LANG.captures_iter(&clean) {
+                if let Some(m) = cap.get(1) {
+                    let lang = m.as_str().to_lowercase();
+                    // Normalize common aliases
+                    let normalized = match lang.as_str() {
+                        "rs" => "rust",
+                        "js" | "jsx" => "javascript",
+                        "ts" | "tsx" => "typescript",
+                        "py" => "python",
+                        "sh" | "zsh" | "fish" | "bash" | "powershell" | "ps1" => "shell",
+                        "docker" => "docker",
+                        "yml" => "yaml",
+                        "c++" | "cxx" | "cc" => "cpp",
+                        "objc" | "objective-c" => "c",
+                        "kt" => "kotlin",
+                        "cs" | "csharp" => "csharp",
+                        "rb" => "ruby",
+                        "tex" => "latex",
+                        "md" => "markdown",
+                        other => other,
+                    };
+                    if !tags.iter().any(|x: &String| x == normalized) {
+                        lang_from_fence = Some(normalized.to_string());
+                        tags.push(normalized.to_string());
+                    }
+                }
+            }
         }
-        if RE_IMAGE.is_match(&clean) {
-            push("image");
+
+        // ─── Language detection: syntax-pattern heuristics (no fence hint) ─
+        if lang_from_fence.is_none() {
+            let syntax_lang = if RE_LANG_RUST.is_match(&clean) {
+                Some("rust")
+            } else if RE_LANG_PYTHON.is_match(&clean) {
+                Some("python")
+            } else if RE_LANG_JS.is_match(&clean) {
+                Some("javascript")
+            } else if RE_LANG_GO.is_match(&clean) {
+                Some("go")
+            } else if RE_LANG_CPP.is_match(&clean) {
+                Some("cpp")
+            } else if RE_LANG_C.is_match(&clean) {
+                Some("c")
+            } else if RE_LANG_JAVA.is_match(&clean) {
+                Some("java")
+            } else if RE_LANG_RUBY.is_match(&clean) {
+                Some("ruby")
+            } else if RE_LANG_SHELL.is_match(&clean) {
+                Some("shell")
+            } else if RE_LANG_PHP.is_match(&clean) {
+                Some("php")
+            } else if RE_LANG_DOCKER.is_match(&clean) {
+                Some("docker")
+            } else if RE_LANG_SQL.is_match(&clean) {
+                Some("sql")
+            } else if RE_LANG_YAML.is_match(&clean) {
+                Some("yaml")
+            } else if RE_LANG_JSON.is_match(&clean) {
+                Some("json")
+            } else if RE_LANG_HTML.is_match(&clean) {
+                Some("html")
+            } else if RE_LANG_CSS.is_match(&clean) {
+                Some("css")
+            } else if RE_LANG_LATEX.is_match(&clean) {
+                Some("latex")
+            } else {
+                None
+            };
+            if let Some(lang) = syntax_lang {
+                if !tags.iter().any(|x: &String| x == lang) {
+                    tags.push(lang.to_string());
+                }
+            }
         }
-        if has_pipe && RE_TABLE_ROW.is_match(&clean) && clean.contains("---") {
-            push("table");
-        }
-        if RE_FIGURE.is_match(&clean) {
-            push("figure");
-        }
-        if RE_AUDIO.is_match(&clean) {
-            push("audio");
-        }
-        if RE_VIDEO.is_match(&clean) {
-            push("video");
-        }
-        if has_fence && RE_CODE.is_match(&clean) {
-            push("code");
-        }
-        if has_fence && RE_MERMAID.is_match(&clean) {
-            push("diagram");
-        }
-        if (clean.contains("$$") || clean.contains("\\frac")) && RE_MATH.is_match(&clean) {
-            push("math");
-        }
-        // Calendar events (📅 lines) — the other half of the CalDAV sync.
-        if clean.contains('📅') && !parser::parse_events(&clean).is_empty() {
-            push("event");
-        }
-        if RE_TASK.is_match(&clean) {
-            push("task");
-        }
-        if RE_QUOTE.is_match(&clean) {
-            push("quote");
+
+        // ─── CJK / human-language detection ───────────────────────────────
+        // Korean is checked first per user preference (#한글 tag).
+        if RE_KOREAN.is_match(&clean) {
+            let t = "한글";
+            if !tags.iter().any(|x| x == t) {
+                tags.push(t.to_string());
+            }
+        } else if RE_JAPANESE.is_match(&clean) {
+            let t = "日本語";
+            if !tags.iter().any(|x| x == t) {
+                tags.push(t.to_string());
+            }
+        } else if RE_CHINESE.is_match(&clean) {
+            let t = "中文";
+            if !tags.iter().any(|x| x == t) {
+                tags.push(t.to_string());
+            }
         }
 
         for cap in RE_FILE_EXT.captures_iter(&clean) {
@@ -762,5 +943,230 @@ mod tests {
         // (pre-existing policy: e.g. OCR/version fragments like #3v2).
         assert!(Autotagger::is_junk_hashtag("2026"));
         assert!(!Autotagger::is_junk_hashtag("2026notes")); // len>4, not ver-pattern
+    }
+
+    // ─── Language detection: fenced code-block hints ─────────────────────
+
+    #[test]
+    fn fence_lang_rust() {
+        let d = detected("```rust\nfn main() {}\n```");
+        assert!(d.contains(&"rust".to_string()), "expected #rust in {:?}", d);
+    }
+
+    #[test]
+    fn fence_lang_python() {
+        let d = detected("```python\ndef foo():\n    pass\n```");
+        assert!(d.contains(&"python".to_string()));
+    }
+
+    #[test]
+    fn fence_lang_javascript() {
+        let d = detected("```javascript\nconsole.log(1)\n```");
+        assert!(d.contains(&"javascript".to_string()));
+    }
+
+    #[test]
+    fn fence_lang_go() {
+        let d = detected("```go\nfunc main() {}\n```");
+        assert!(d.contains(&"go".to_string()));
+    }
+
+    #[test]
+    fn fence_lang_shell() {
+        let d = detected("```bash\necho hi\n```");
+        assert!(d.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn fence_lang_docker() {
+        let d = detected("```docker\nFROM ubuntu\n```");
+        assert!(d.contains(&"docker".to_string()));
+    }
+
+    #[test]
+    fn fence_lang_aliases() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("```rs\nfn main() {}\n```", "rust"),
+            ("```py\nprint(1)\n```", "python"),
+            ("```js\nconsole.log(1)\n```", "javascript"),
+            ("```jsx\n<div/>\n```", "javascript"),
+            ("```ts\nconst x = 1\n```", "typescript"),
+            ("```tsx\nconst x = 1\n```", "typescript"),
+            ("```sh\necho hi\n```", "shell"),
+            ("```zsh\necho hi\n```", "shell"),
+            ("```fish\necho hi\n```", "shell"),
+            ("```c++\n#include <iostream>\n```", "cpp"),
+            ("```cxx\n#include <iostream>\n```", "cpp"),
+            ("```rb\nputs 1\n```", "ruby"),
+            ("```tex\n\\documentclass\n```", "latex"),
+            ("```md\n# Hello\n```", "markdown"),
+        ];
+        for (input, expected) in cases {
+            let d = detected(input);
+            assert!(
+                d.contains(&expected.to_string()),
+                "expected #{} from {:?}, got {:?}",
+                expected,
+                input,
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn fence_lang_bare_fence_no_lang_tag() {
+        // Bare ``` without a language hint should NOT add a language tag.
+        let d = detected("```\ngeneric code\n```");
+        // Should have #code but no language-specific tag.
+        assert!(d.contains(&"code".to_string()));
+        // None of the language tags should be present.
+        for lang in ["rust", "python", "javascript", "go", "shell", "docker", "sql", "yaml", "json", "html", "css", "latex", "cpp", "c", "java", "ruby", "php", "typescript"] {
+            assert!(!d.contains(&lang.to_string()), "unexpected #{} in {:?}", lang, d);
+        }
+    }
+
+    // ─── Language detection: syntax-pattern heuristics ───────────────────
+
+    #[test]
+    fn syntax_heuristic_rust() {
+        let d = detected("fn main() {\n    let mut x = 5;\n    match x {\n        _ => {}\n    }\n}");
+        assert!(d.contains(&"rust".to_string()), "expected #rust in {:?}", d);
+    }
+
+    #[test]
+    fn syntax_heuristic_python() {
+        let d = detected("def foo():\n    import os\n    if __name__ == '__main__':\n        print('hi')");
+        assert!(d.contains(&"python".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_javascript() {
+        let d = detected("const x = 1;\nfunction greet() {\n    console.log(x);\n}");
+        assert!(d.contains(&"javascript".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_go() {
+        let d = detected("package main\nimport \"fmt\"\nfunc main() {\n    fmt.Println(\"hi\")\n}");
+        assert!(d.contains(&"go".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_cpp() {
+        let d = detected("#include <iostream>\nstd::cout << \"hi\";\nnamespace foo {}");
+        assert!(d.contains(&"cpp".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_c() {
+        // Pure C patterns that don't trigger CPP (no std::, cout, etc.)
+        let d = detected("#include <stdio.h>\nint main() {\n    printf(\"hi\");\n    return 0;\n}");
+        assert!(d.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_java() {
+        let d = detected("public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"hi\");\n    }\n}");
+        assert!(d.contains(&"java".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_shell() {
+        let d = detected("#!/bin/bash\necho hi\nfor x in a b c; do echo $x; done");
+        assert!(d.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_docker() {
+        let d = detected("FROM ubuntu:22.04\nRUN apt-get update\nCOPY . /app\nCMD [\"node\"]");
+        assert!(d.contains(&"docker".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_sql() {
+        let d = detected("SELECT * FROM users WHERE id = 1\nORDER BY name");
+        assert!(d.contains(&"sql".to_string()));
+    }
+
+    #[test]
+    fn syntax_heuristic_yaml() {
+        let d = detected("services:\n  web:\n    build: .\n    ports:\n      - 8080:80");
+        assert!(d.contains(&"yaml".to_string()));
+    }
+
+    #[test]
+    fn syntax_not_duplicate_with_fence() {
+        // Fence hint already adds #rust; syntax heuristic must NOT add a duplicate.
+        let d = detected("```rust\nfn main() {}\n```");
+        let rust_count = d.iter().filter(|x| *x == "rust").count();
+        assert_eq!(rust_count, 1, "expected exactly 1 #rust, got {:?}", d);
+    }
+
+    #[test]
+    fn fence_takes_priority_over_syntax() {
+        // Content has Python syntax but fence says JavaScript → #javascript wins.
+        let d = detected("```javascript\nimport os\nprint('hi')\n```");
+        assert!(d.contains(&"javascript".to_string()));
+        assert!(!d.contains(&"python".to_string()), "syntax should not override fence: {:?}", d);
+    }
+
+    // ─── CJK / human-language detection ──────────────────────────────────
+
+    #[test]
+    fn korean_detection() {
+        let d = detected("오늘 날씨가 좋다");
+        assert!(d.contains(&"한글".to_string()), "expected #한글 in {:?}", d);
+    }
+
+    #[test]
+    fn korean_with_code() {
+        let d = detected("```rust\nfn main() {}\n```\n오늘 회의록 작성");
+        assert!(d.contains(&"한글".to_string()));
+        assert!(d.contains(&"rust".to_string()));
+        assert!(d.contains(&"code".to_string()));
+    }
+
+    #[test]
+    fn japanese_detection() {
+        let d = detected("今日はいい天気です");
+        assert!(d.contains(&"日本語".to_string()), "expected #日本語 in {:?}", d);
+    }
+
+    #[test]
+    fn chinese_detection() {
+        let d = detected("今天天气很好");
+        assert!(d.contains(&"中文".to_string()), "expected #中文 in {:?}", d);
+    }
+
+    #[test]
+    fn cjk_korean_overrides_japanese() {
+        // Mixed Korean + Japanese: Korean is checked first, so only #한글.
+        let d = detected("오늘 날씨가 좋다 今日はいい天気");
+        assert!(d.contains(&"한글".to_string()));
+        assert!(!d.contains(&"日本語".to_string()), "Japanese should not appear when Korean is present: {:?}", d);
+    }
+
+    #[test]
+    fn cjk_japanese_overrides_chinese() {
+        // Japanese kana + Chinese characters: Japanese wins.
+        let d = detected("今日は中国語を勉強した");
+        assert!(d.contains(&"日本語".to_string()));
+        assert!(!d.contains(&"中文".to_string()), "Chinese should not appear when Japanese is present: {:?}", d);
+    }
+
+    #[test]
+    fn cjk_pure_chinese_no_kana() {
+        // Only Han characters, no kana → Chinese.
+        let d = detected("中华人民共和国万岁");
+        assert!(d.contains(&"中文".to_string()));
+        assert!(!d.contains(&"日本語".to_string()));
+        assert!(!d.contains(&"한글".to_string()));
+    }
+
+    #[test]
+    fn cjk_korean_with_hashtags() {
+        let d = detected("오늘 #일기 쓰기\n```python\nprint('hello')\n```");
+        assert!(d.contains(&"한글".to_string()));
+        assert!(d.contains(&"python".to_string()));
     }
 }
