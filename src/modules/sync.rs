@@ -271,7 +271,12 @@ impl SyncService {
                 existing_indices.remove(&idx);
             } else {
                 let uid = parser::event_uid(memo_id, event.index);
-                let href = format!("{}.ics", uid);
+                let collection = cal.collection_path();
+                let href = if collection.is_empty() {
+                    format!("{}.ics", uid)
+                } else {
+                    format!("{}/{}.ics", collection, uid)
+                };
                 let dtstart = format!("{}{}", event.date, event.time.as_deref().map(|t| format!("T{}Z", t)).unwrap_or_default());
                 let item = CalDavItem::Event(VEvent {
                     uid: uid.clone(),
