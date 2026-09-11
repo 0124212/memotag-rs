@@ -1,6 +1,5 @@
 use anyhow::Result;
 use sha2::{Sha256, Digest};
-use std::time::Duration;
 use tracing::{info, warn};
 
 use super::caldav::{self, CalDavClient, CalDavItem, VTodo, VTodoStatus, VEvent};
@@ -13,7 +12,6 @@ pub struct SyncService {
     caldav: Option<CalDavClient>,
     memos: MemosClient,
     db: Database,
-    poll_interval: Duration,
 }
 
 impl SyncService {
@@ -31,9 +29,7 @@ impl SyncService {
             None
         };
 
-        let poll_interval = Duration::from_secs(config.caldav.poll_secs);
-
-        Ok(Self { caldav, memos, db, poll_interval })
+        Ok(Self { caldav, memos, db })
     }
 
     pub async fn ensure_cal(&self) -> Result<()> {

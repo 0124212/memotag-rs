@@ -139,10 +139,6 @@ static RE_LANG_JSON: LazyLock<Regex> = LazyLock::new(|| {
 static RE_LANG_LATEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)(\\documentclass|\\begin\{|\\end\{|\\usepackage|\\section|\\textbf|\\textit|\\frac|\\int|\\sum|\\alpha|\\beta|\\gamma)").unwrap()
 });
-static RE_LANG_MARKDOWN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)(^#{1,6}\s|^\s*\*\*\w|^\s*-\s+\[|^\s*\d+\.\s|^\s*>\s|^\s*```|^\s*\|.*\|)").unwrap()
-});
-
 // ─── CJK language detection ────────────────────────────────────────────────
 
 /// Korean (Hangul) characters: U+AC00-U+D7AF (syllables), U+1100-U+11FF (jamo), U+3130-U+318F (compat jamo)
