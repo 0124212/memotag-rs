@@ -2,3 +2,6 @@ target/
 Cargo.lock
 *.log
 *-linux
+# Compiled binaries
+memos-autotagger
+memotag-rs
