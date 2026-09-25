@@ -1,5 +1,7 @@
 # memotag-rs
 
+[![Rust](https://img.shields.io/badge/rust-2021-orange?style=flat-square&logo=rust)](https://www.rust-lang.org) [![Memos](https://img.shields.io/badge/memos-0.30-blue?style=flat-square)](https://github.com/usememos/memos) [![CalDAV](https://img.shields.io/badge/CalDAV-sync-8A2BE2?style=flat-square)](#) [![Build](https://img.shields.io/github/actions/workflow/status/0124212/memotag-rs/build.yml?style=flat-square&label=ghcr)](https://github.com/0124212/memotag-rs/actions) [![Docker](https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white)](Dockerfile) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+
 Rust daemon for [Memos](https://github.com/usememos/memos): content-based
 auto-tagging plus CalDAV task/event sync. Prod runs on ubuntu/oracle as
 `ghcr.io/0124212/memotag-rs:main` next to `memos` (neosmemo/memos:stable).
