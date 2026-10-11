@@ -2,11 +2,13 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +54,7 @@ impl Database {
             info!("created new database at {}", path);
         }
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     pub async fn get_mappings_for_memo(&self, memo_id: &str) -> Result<Vec<SyncMapping>> {

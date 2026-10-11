@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     }
 
     let db = Database::open(&config.db_path)?;
-    let sync = SyncService::new(&config, db)?;
+    let sync = SyncService::new(&config, db.clone())?;
 
     if let Err(e) = sync.ensure_cal().await {
         warn!("CalDAV collection setup failed: {}", e);
@@ -142,9 +142,9 @@ async fn main() -> Result<()> {
 
     // Spawn sync service (listens for webhook triggers + periodic polling)
     let sync_config = config.clone();
+    let sync_db = db.clone();
     tokio::spawn(async move {
-        let db = Database::open(&sync_config.db_path).expect("failed to open db for sync");
-        let sync = SyncService::new(&sync_config, db).expect("failed to create sync service");
+        let sync = SyncService::new(&sync_config, sync_db).expect("failed to create sync service");
         let poll_interval = std::time::Duration::from_secs(sync_config.caldav.poll_secs);
 
         loop {
